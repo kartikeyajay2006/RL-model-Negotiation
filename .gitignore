@@ -1,26 +1,25 @@
-# Python cache/bytecode
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual environments
+# Environments
 .venv/
 venv/
 env/
 
-# Build/distribution
+# Build
 build/
 dist/
 *.egg-info/
 .eggs/
 
-# Test/coverage
+# Testing
 .pytest_cache/
-.coverage
-.coverage.*
+.coverage*
 htmlcov/
 
-# Type checker/linter caches
+# Lint/type
 .mypy_cache/
 .ruff_cache/
 .pyre/
@@ -28,24 +27,46 @@ htmlcov/
 # Jupyter
 .ipynb_checkpoints/
 
-# OS/editor noise
+# OS/editor
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
 
-# Local secrets/config
+# Secrets
 .env
 .env.*
 *.local
 
-# Project artifacts
-logs/
-outputs/
-
-# Generated figures/reports
-*.png
-*.pdf
-
-# Runtime/debug logs
+# Logs
 *.log
+
+# ML models (CRITICAL)
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.h5
+*.onnx
+*.safetensors
+
+# ML outputs
+outputs/
+checkpoints/
+runs/
+wandb/
+mlruns/
+tensorboard/
+
+# Data
+data/
+datasets/
+
+# Cache/temp
+cache/
+.tmp/
+*.tmp
+
+# Generated media (only outputs)
+outputs/**/*.png
+outputs/**/*.pdf
