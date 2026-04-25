@@ -150,6 +150,10 @@ class Logger:
     json_filename: str = "training_log.json"
     csv_filename: str = "training_log.csv"
     config_filename: str = "config.json"
+    step_jsonl_filename: str = "logs.jsonl"
+    step_pretty_filename: str = "logs_pretty.txt"
+    conversation_jsonl_filename: str = "conversations.jsonl"
+    conversation_pretty_filename: str = "conversations_readable.txt"
     flatten_separator: str = "."
 
     _records_cache: List[Dict[str, Any]] = field(default_factory=list, init=False)
@@ -165,6 +169,10 @@ class Logger:
         self.json_path = self.run_dir / self.json_filename
         self.csv_path = self.run_dir / self.csv_filename
         self.config_path = self.run_dir / self.config_filename
+        self.step_jsonl_path = self.run_dir / self.step_jsonl_filename
+        self.step_pretty_path = self.run_dir / self.step_pretty_filename
+        self.conversation_jsonl_path = self.run_dir / self.conversation_jsonl_filename
+        self.conversation_pretty_path = self.run_dir / self.conversation_pretty_filename
 
         self._bootstrap_from_existing_logs()
 
@@ -244,6 +252,101 @@ class Logger:
     def load_records(self) -> List[Dict[str, Any]]:
         return _load_json_records(self.json_path)
 
+    def log_step(
+        self,
+        *,
+        episode_index: int,
+        step_index: int,
+        total_reward: float,
+        reward_breakdown: Optional[Mapping[str, Any]] = None,
+        info: Optional[Mapping[str, Any]] = None,
+        extra_metrics: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        breakdown = reward_breakdown or {}
+        info_map = info or {}
+        extras = extra_metrics or {}
+
+        flat_breakdown = flatten_dict(
+            safe_serialize(dict(breakdown)),
+            parent_key="reward",
+            sep=self.flatten_separator,
+        )
+        flat_info = flatten_dict(info_map, parent_key="info", sep=self.flatten_separator)
+        flat_extra = flatten_dict(extras, parent_key="metrics", sep=self.flatten_separator)
+
+        step_record: Dict[str, Any] = {
+            "timestamp": float(time.time()),
+            "episode_index": int(episode_index),
+            "step_index": int(step_index),
+            "total_reward": float(total_reward),
+            "value_reward": _safe_float(flat_breakdown.get("reward.value_reward")),
+            "agreement_reward": _safe_float(flat_breakdown.get("reward.agreement_reward")),
+            "trust_reward": _safe_float(flat_breakdown.get("reward.trust_reward")),
+            "risk_penalty": _safe_float(flat_breakdown.get("reward.risk_penalty")),
+            "inefficiency_penalty": _safe_float(flat_breakdown.get("reward.inefficiency_penalty")),
+            "invalid_action_penalty": _safe_float(flat_breakdown.get("reward.invalid_action_penalty")),
+            "invalid_penalty": _safe_float(
+                flat_breakdown.get("reward.invalid_penalty")
+                if flat_breakdown.get("reward.invalid_penalty") is not None
+                else flat_breakdown.get("reward.invalid_action_penalty")
+            ),
+        }
+        step_record.update(flat_breakdown)
+        step_record.update(flat_info)
+        step_record.update(flat_extra)
+
+        with self.step_jsonl_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(safe_serialize(step_record), ensure_ascii=True) + "\n")
+        with self.step_pretty_path.open("a", encoding="utf-8") as f:
+            f.write(
+                "Step {step} | reward={reward:.4f} | risk={risk:.4f} | success={success}\n".format(
+                    step=step_record["step_index"],
+                    reward=float(step_record["total_reward"]),
+                    risk=float(step_record.get("risk_score") or 0.0),
+                    success=int((step_record.get("info.termination.deal_success") or 0) > 0),
+                )
+            )
+
+        return step_record
+
+    def log_conversation(
+        self,
+        *,
+        episode_index: int,
+        steps: Sequence[Mapping[str, Any]],
+        final_summary: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        summary = dict(final_summary or {})
+        record = {
+            "episode_index": int(episode_index),
+            "timestamp": float(time.time()),
+            "steps": safe_serialize(list(steps)),
+            "final": safe_serialize(summary),
+        }
+        with self.conversation_jsonl_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=True) + "\n")
+
+        lines: List[str] = [f"Episode {episode_index}:", "-" * 26]
+        for s in steps:
+            step = dict(s)
+            buyer = step.get("buyer_offer")
+            seller = step.get("seller_decision")
+            seller_counter = step.get("seller_counter")
+            if buyer is not None:
+                lines.append(f"Buyer: offer = {buyer}")
+            if seller_counter is not None:
+                lines.append(f"Seller: counter = {seller_counter}")
+            elif seller is not None:
+                lines.append(f"Seller: {seller}")
+        lines.append("-" * 26)
+        lines.append("Final:")
+        lines.append(f"Reward: {summary.get('total_reward', 0.0)}")
+        lines.append(f"Risk: {summary.get('risk_score', 0.0)}")
+        lines.append("-" * 26)
+        with self.conversation_pretty_path.open("a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        return record
+
     def _bootstrap_from_existing_logs(self) -> None:
         self._records_cache = _load_json_records(self.json_path)
         if self._records_cache:
@@ -287,4 +390,3 @@ class Logger:
             writer.writeheader()
             for row in rows:
                 writer.writerow(_coerce_csv_row(row, self._csv_fieldnames))
-

@@ -43,6 +43,8 @@ class EpisodeResult:
     quality: float
     steps: int
     transcript: List[Dict[str, Any]]
+    step_logs: List[Dict[str, Any]]
+    avg_risk: float
 
 
 def load_config(path: str) -> Dict[str, Any]:
@@ -150,6 +152,7 @@ def rollout_episode_from_actions(
     obs = env.reset(seed=seed)
 
     transcript: List[Dict[str, Any]] = []
+    step_logs: List[Dict[str, Any]] = []
     total_reward = 0.0
     done = False
 
@@ -163,6 +166,18 @@ def rollout_episode_from_actions(
         step_event = event_log[-1] if event_log else {}
         step_event["step"] = i + 1
         transcript.append(step_event)
+        reward_components = info.get("reward_components", {}) if isinstance(info, dict) else {}
+        reward_meta = info.get("reward_metadata", {}) if isinstance(info, dict) else {}
+        step_logs.append(
+            {
+                "step": i + 1,
+                "action": a.get("action_name"),
+                "total_reward": float(reward or 0.0),
+                "risk_score": float(reward_components.get("risk_penalty", 0.0)),
+                "trust_score": float(reward_meta.get("trust_score", 0.0)),
+                **{k: float(v) for k, v in reward_components.items() if isinstance(v, (int, float))},
+            }
+        )
 
     rng = random.Random(seed + 17)
     while not done:
@@ -174,6 +189,18 @@ def rollout_episode_from_actions(
         step_event = event_log[-1] if event_log else {}
         step_event["step"] = len(transcript) + 1
         transcript.append(step_event)
+        reward_components = info.get("reward_components", {}) if isinstance(info, dict) else {}
+        reward_meta = info.get("reward_metadata", {}) if isinstance(info, dict) else {}
+        step_logs.append(
+            {
+                "step": len(transcript),
+                "action": a.get("action_name"),
+                "total_reward": float(reward or 0.0),
+                "risk_score": float(reward_components.get("risk_penalty", 0.0)),
+                "trust_score": float(reward_meta.get("trust_score", 0.0)),
+                **{k: float(v) for k, v in reward_components.items() if isinstance(v, (int, float))},
+            }
+        )
 
     st = env.state().get("dynamic_state", {})
     terminal = st.get("terminal", {})
@@ -182,7 +209,16 @@ def rollout_episode_from_actions(
     steps = int(st.get("time_steps", {}).get("current", len(transcript)))
 
     env.close()
-    return EpisodeResult(total_reward=total_reward, success=success, quality=quality, steps=steps, transcript=transcript)
+    avg_risk = float(np.mean([x.get("risk_score", 0.0) for x in step_logs])) if step_logs else 0.0
+    return EpisodeResult(
+        total_reward=total_reward,
+        success=success,
+        quality=quality,
+        steps=steps,
+        transcript=transcript,
+        step_logs=step_logs,
+        avg_risk=avg_risk,
+    )
 
 
 def generate_plan_with_model(
@@ -213,7 +249,7 @@ def evaluate_policy(
     max_new_tokens: int,
     temperature: float,
 ) -> Dict[str, Any]:
-    rewards, successes, qualities, steps = [], [], [], []
+    rewards, successes, qualities, steps, risks = [], [], [], [], []
     transcripts = []
 
     for s in eval_seeds:
@@ -236,6 +272,7 @@ def evaluate_policy(
         successes.append(1 if result.success else 0)
         qualities.append(result.quality)
         steps.append(result.steps)
+        risks.append(result.avg_risk)
         transcripts.append(
             {
                 "seed": s,
@@ -258,10 +295,12 @@ def evaluate_policy(
         "success_rate": float(np.mean(successes)),
         "quality_mean": float(np.mean(qualities)),
         "steps_mean": float(np.mean(steps)),
+        "risk_mean": float(np.mean(risks)),
         "rewards": rewards,
         "successes": successes,
         "qualities": qualities,
         "steps": steps,
+        "risks": risks,
         "transcripts": transcripts,
     }
 
@@ -277,6 +316,115 @@ def save_jsonl(path: Path, rows: List[Dict[str, Any]]) -> None:
     with open(path, "w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=True) + "\n")
+
+
+def save_pretty_step_logs(path: Path, rows: List[Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(
+                "Step {step} | reward={reward:.2f} | risk={risk:.2f} | success={success}\n".format(
+                    step=int(r.get("step", 0)),
+                    reward=float(r.get("total_reward", 0.0)),
+                    risk=float(r.get("risk_score", 0.0)),
+                    success=int(bool(r.get("success", False))),
+                )
+            )
+
+
+def moving_average(values: List[float], window: int) -> List[float]:
+    if window <= 1:
+        return [float(v) for v in values]
+    out: List[float] = []
+    q: List[float] = []
+    s = 0.0
+    for v in values:
+        q.append(float(v))
+        s += float(v)
+        if len(q) > window:
+            s -= q.pop(0)
+        out.append(s / float(len(q)))
+    return out
+
+
+def rolling_success(values: List[int], window: int) -> List[float]:
+    return moving_average([float(v) for v in values], window)
+
+
+def plot_judge_ready_curves(out_dir: Path, step_rows: List[Dict[str, Any]], baseline_reward: float) -> None:
+    if not step_rows:
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+    x = list(range(len(step_rows)))
+    rewards = [float(r.get("total_reward", 0.0)) for r in step_rows]
+    risk = [float(r.get("risk_score", 0.0)) for r in step_rows]
+    trust = [float(r.get("trust_score", 0.0)) for r in step_rows]
+    success = [1 if bool(r.get("success", False)) else 0 for r in step_rows]
+
+    reward_ma = moving_average(rewards, max(2, len(rewards) // 10))
+    risk_ma = moving_average(risk, max(2, len(risk) // 10))
+    success_ma = rolling_success(success, max(2, len(success) // 10))
+    efficiency = [rw / max(1e-6, rk) for rw, rk in zip(rewards, risk)]
+
+    fig = plt.figure(figsize=(10, 4))
+    plt.plot(x, rewards, label="reward", alpha=0.5)
+    plt.plot(x, reward_ma, label="moving_avg", linewidth=2.0)
+    plt.axhline(float(baseline_reward), linestyle="--", label="baseline")
+    plt.xlabel("Step")
+    plt.ylabel("Reward")
+    plt.title("Reward Curve")
+    plt.grid(alpha=0.25)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_dir / "reward_curve.png", dpi=150)
+    plt.close(fig)
+
+    fig = plt.figure(figsize=(10, 4))
+    plt.plot(x, risk, label="risk", alpha=0.5)
+    plt.plot(x, risk_ma, label="smoothed_risk", linewidth=2.0)
+    plt.xlabel("Step")
+    plt.ylabel("Risk")
+    plt.title("Risk Curve")
+    plt.grid(alpha=0.25)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_dir / "risk_curve.png", dpi=150)
+    plt.close(fig)
+
+    fig = plt.figure(figsize=(10, 4))
+    plt.plot(x, success_ma, label="rolling_success")
+    plt.xlabel("Step")
+    plt.ylabel("Success Rate")
+    plt.title("Success Curve")
+    plt.grid(alpha=0.25)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_dir / "success_curve.png", dpi=150)
+    plt.close(fig)
+
+    fig = plt.figure(figsize=(10, 4))
+    plt.plot(x, [float(r.get("value_reward", 0.0)) for r in step_rows], label="value")
+    plt.plot(x, [float(r.get("risk_penalty", 0.0)) for r in step_rows], label="risk_penalty")
+    plt.plot(x, [float(r.get("trust_reward", 0.0)) for r in step_rows], label="trust_reward")
+    plt.xlabel("Step")
+    plt.ylabel("Component Value")
+    plt.title("Reward Components Over Time")
+    plt.grid(alpha=0.25)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_dir / "reward_components.png", dpi=150)
+    plt.close(fig)
+
+    fig = plt.figure(figsize=(10, 4))
+    plt.plot(x, efficiency, label="reward/risk")
+    plt.xlabel("Step")
+    plt.ylabel("Efficiency")
+    plt.title("Learning Efficiency")
+    plt.grid(alpha=0.25)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_dir / "learning_efficiency.png", dpi=150)
+    plt.close(fig)
 
 
 def plot_comparison(before: Dict[str, Any], after: Dict[str, Any], out_dir: Path) -> None:
@@ -313,6 +461,45 @@ def plot_comparison(before: Dict[str, Any], after: Dict[str, Any], out_dir: Path
     plt.close(fig)
 
 
+def save_conversations(out_dir: Path, transcripts: List[Dict[str, Any]]) -> None:
+    jsonl_path = out_dir / "conversations.jsonl"
+    txt_path = out_dir / "conversations_readable.txt"
+    save_jsonl(jsonl_path, transcripts)
+    lines: List[str] = []
+    for idx, tr in enumerate(transcripts):
+        lines.append(f"Episode {idx + 1}:")
+        lines.append("-" * 26)
+        for ev in tr.get("transcript", []):
+            action = ev.get("action")
+            seller = ev.get("seller", {})
+            offer = ev.get("action_payload", {}).get("price_signal")
+            if offer is not None:
+                lines.append(f"Buyer: offer = {offer:.2f}" if isinstance(offer, (int, float)) else f"Buyer: offer = {offer}")
+            elif action:
+                lines.append(f"Buyer: action = {action}")
+            if isinstance(seller, dict):
+                if seller.get("decision") == "counter":
+                    counter = seller.get("counter_offer", {}).get("price_signal")
+                    if counter is not None:
+                        lines.append(f"Seller: counter = {counter:.2f}" if isinstance(counter, (int, float)) else f"Seller: counter = {counter}")
+                elif seller.get("decision") is not None:
+                    lines.append(f"Seller: {seller.get('decision')}")
+        ep = tr.get("episode", {})
+        risk_vals = []
+        for ev in tr.get("transcript", []):
+            risk = ev.get("risk", {})
+            if isinstance(risk, dict) and isinstance(risk.get("risk_score"), (int, float)):
+                risk_vals.append(float(risk["risk_score"]))
+        lines.append("-" * 26)
+        lines.append("Final:")
+        lines.append(f"Reward: {float(ep.get('total_reward', 0.0)):.2f}")
+        lines.append(f"Risk: {float(np.mean(risk_vals)) if risk_vals else 0.0:.2f}")
+        lines.append("-" * 26)
+        lines.append("")
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
 def create_training_dataset(config_path: str, n_prompts: int, seed: int) -> Dataset:
     rng = random.Random(seed)
     rows = []
@@ -332,20 +519,27 @@ def write_summary(out_dir: Path, before: Dict[str, Any], after: Dict[str, Any]) 
     lines = []
     lines.append("# DealForge PPO Summary")
     lines.append("")
+    lines.append("## Reward Formula")
+    lines.append("- total = value + agreement + trust - risk - pressure - inefficiency - invalid - repeat - oscillation + success + deal_bonus")
+    lines.append("- total_reward is clipped to [-2, 2]")
+    lines.append("")
     lines.append("## Baseline")
     lines.append(f"- reward_mean: {before['reward_mean']:.4f}")
     lines.append(f"- success_rate: {before['success_rate']:.4f}")
     lines.append(f"- quality_mean: {before['quality_mean']:.4f}")
+    lines.append(f"- risk_mean: {before.get('risk_mean', 0.0):.4f}")
     lines.append("")
     lines.append("## Trained")
     lines.append(f"- reward_mean: {after['reward_mean']:.4f}")
     lines.append(f"- success_rate: {after['success_rate']:.4f}")
     lines.append(f"- quality_mean: {after['quality_mean']:.4f}")
+    lines.append(f"- risk_mean: {after.get('risk_mean', 0.0):.4f}")
     lines.append("")
     lines.append("## Delta (trained - baseline)")
     lines.append(f"- reward_mean_delta: {after['reward_mean'] - before['reward_mean']:.4f}")
     lines.append(f"- success_rate_delta: {after['success_rate'] - before['success_rate']:.4f}")
     lines.append(f"- quality_mean_delta: {after['quality_mean'] - before['quality_mean']:.4f}")
+    lines.append(f"- risk_mean_delta: {after.get('risk_mean', 0.0) - before.get('risk_mean', 0.0):.4f}")
 
     with open(out_dir / "summary.md", "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
@@ -365,6 +559,7 @@ def ppo_train_with_environment(
 ) -> Dict[str, Any]:
     rng = random.Random(12345)
     logs: List[Dict[str, Any]] = []
+    step_rows: List[Dict[str, Any]] = []
 
     device = torch.device("cpu")
 
@@ -409,6 +604,11 @@ def ppo_train_with_environment(
             query_tensors.append(query_ids)
             response_tensors.append(response_ids)
             rewards_list.append(float(ep.total_reward))
+            for row in ep.step_logs:
+                row_copy = dict(row)
+                row_copy["global_step"] = len(step_rows)
+                row_copy["success"] = bool(ep.success)
+                step_rows.append(row_copy)
 
         reward_tensors = [
             torch.tensor(r, dtype=torch.float32).to(device)
@@ -427,9 +627,11 @@ def ppo_train_with_environment(
             "stats": {k: float(v) if isinstance(v, (int, float, np.number)) else str(v) for k, v in stats.items()},
         }
         logs.append(step_log)
-        print(f"Step {step} | reward_mean={np.mean(rewards_list):.4f}")
+        avg_risk = float(np.mean([float(x.get("risk_score", 0.0)) for x in step_rows[-max(1, batch_size):]]))
+        success_int = int(np.mean([1 if bool(x.get("success", False)) else 0 for x in step_rows[-max(1, batch_size):]]) >= 0.5)
+        print(f"Step {step} | reward={np.mean(rewards_list):.2f} | risk={avg_risk:.2f} | success={success_int}")
 
-    return {"logs": logs}
+    return {"logs": logs, "step_logs": step_rows}
 
 
 def main() -> None:
@@ -497,7 +699,6 @@ def main() -> None:
     device = torch.device("cpu")
     model.to(device)
     ref_model.to(device)
-    print(type(model))
 
     trainer = PPOTrainer(
         model=model,
@@ -524,6 +725,9 @@ def main() -> None:
     tokenizer.save_pretrained(trained_model_dir)
 
     save_json(out_dir / "train_output.json", train_output)
+    save_jsonl(out_dir / "logs.jsonl", train_output.get("step_logs", []))
+    save_pretty_step_logs(out_dir / "logs_pretty.txt", train_output.get("step_logs", []))
+    plot_judge_ready_curves(out_dir, train_output.get("step_logs", []), baseline_metrics["reward_mean"])
 
     trained_model = AutoModelForCausalLMWithValueHead.from_pretrained(str(trained_model_dir))
     trained_metrics = evaluate_policy(
@@ -539,6 +743,7 @@ def main() -> None:
     k = min(8, len(eval_seeds))
     save_jsonl(out_dir / "transcripts_baseline.jsonl", baseline_metrics["transcripts"][:k])
     save_jsonl(out_dir / "transcripts_trained.jsonl", trained_metrics["transcripts"][:k])
+    save_conversations(out_dir, trained_metrics["transcripts"][:k])
 
     comparison_log = {
         "baseline": {
@@ -546,17 +751,20 @@ def main() -> None:
             "success_rate": baseline_metrics["success_rate"],
             "quality_mean": baseline_metrics["quality_mean"],
             "steps_mean": baseline_metrics["steps_mean"],
+            "risk_mean": baseline_metrics.get("risk_mean", 0.0),
         },
         "trained": {
             "reward_mean": trained_metrics["reward_mean"],
             "success_rate": trained_metrics["success_rate"],
             "quality_mean": trained_metrics["quality_mean"],
             "steps_mean": trained_metrics["steps_mean"],
+            "risk_mean": trained_metrics.get("risk_mean", 0.0),
         },
         "delta": {
             "reward_mean": trained_metrics["reward_mean"] - baseline_metrics["reward_mean"],
             "success_rate": trained_metrics["success_rate"] - baseline_metrics["success_rate"],
             "quality_mean": trained_metrics["quality_mean"] - baseline_metrics["quality_mean"],
+            "risk_mean": trained_metrics.get("risk_mean", 0.0) - baseline_metrics.get("risk_mean", 0.0),
         },
     }
     save_json(out_dir / "comparison.json", comparison_log)
@@ -564,16 +772,7 @@ def main() -> None:
     plot_comparison(baseline_metrics, trained_metrics, out_dir)
     write_summary(out_dir, baseline_metrics, trained_metrics)
 
-    print("Training + evaluation complete.")
-    print(f"Artifacts saved to: {out_dir}")
-    print("Key files:")
-    print("- baseline_metrics.json")
-    print("- trained_metrics.json")
-    print("- comparison.json")
-    print("- reward_over_time.png")
-    print("- success_quality_comparison.png")
-    print("- transcripts_baseline.jsonl")
-    print("- transcripts_trained.jsonl")
+    _ = out_dir
 
 
 if __name__ == "__main__":
