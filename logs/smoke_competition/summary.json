@@ -1,0 +1,10 @@
+{
+  "reward_improvement_pct": -1672.021913028764,
+  "success_improvement_pct": 0.0,
+  "variance_reduction_pct": -66253.9292344488,
+  "first_reward_mean": -0.0911739778020342,
+  "last_reward_mean": -1.615622865632027,
+  "first_reward_variance": 0.003755058205221658,
+  "last_reward_variance": 2.491628664205142,
+  "summary_window": 2.0
+}

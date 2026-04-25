@@ -1,0 +1,9 @@
+{
+  "config_path": "configs/dealforge_default.yaml",
+  "episodes": 5,
+  "seed": 7,
+  "smooth_window": 2,
+  "baseline_window": 2,
+  "summary_window": 2,
+  "learning_phase_ratio": 0.3
+}

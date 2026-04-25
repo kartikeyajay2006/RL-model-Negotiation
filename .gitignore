@@ -1,0 +1,51 @@
+# Python cache/bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build/distribution
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test/coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Type checker/linter caches
+.mypy_cache/
+.ruff_cache/
+.pyre/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local secrets/config
+.env
+.env.*
+*.local
+
+# Project artifacts
+logs/
+outputs/
+
+# Generated figures/reports
+*.png
+*.pdf
+
+# Runtime/debug logs
+*.log
