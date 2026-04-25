@@ -57,6 +57,8 @@ runs/
 wandb/
 mlruns/
 tensorboard/
+artifacts/
+experiments/
 
 # Data
 data/
@@ -66,7 +68,15 @@ datasets/
 cache/
 .tmp/
 *.tmp
+.cache/
+**/.cache/
 
 # Generated media (only outputs)
 outputs/**/*.png
 outputs/**/*.pdf
+
+# Hugging Face / TRL caches
+huggingface/
+hf_cache/
+**/huggingface/
+**/hf_cache/
