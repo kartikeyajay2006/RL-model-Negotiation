@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DealForge | 3D Neural Showcase</title>
+    <style>
+        :root {
+            --primary: #00f2ff;
+            --secondary: #7000ff;
+            --bg: #050505;
+            --card-bg: rgba(255, 255, 255, 0.05);
+            --text: #e0e0e0;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            overflow-x: hidden;
+        }
+
+        .background {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: 
+                radial-gradient(circle at 20% 20%, rgba(112, 0, 255, 0.15) 0%, transparent 40%),
+                radial-gradient(circle at 80% 80%, rgba(0, 242, 255, 0.15) 0%, transparent 40%);
+            z-index: -1;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 4rem 2rem;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 6rem;
+            perspective: 1000px;
+        }
+
+        h1 {
+            font-size: 4rem;
+            margin: 0;
+            background: linear-gradient(to right, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-transform: uppercase;
+            letter-spacing: 0.5rem;
+            transform: translateZ(50px);
+        }
+
+        .subtitle {
+            font-size: 1.2rem;
+            color: rgba(255, 255, 255, 0.6);
+            margin-top: 1rem;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 3rem;
+            perspective: 2000px;
+        }
+
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 24px;
+            padding: 2rem;
+            transform-style: preserve-3d;
+            transition: transform 0.1s ease, box-shadow 0.3s ease;
+            cursor: pointer;
+            position: relative;
+        }
+
+        .card:hover {
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5), 0 0 20px rgba(0, 242, 255, 0.2);
+        }
+
+        .card img {
+            width: 100%;
+            border-radius: 12px;
+            margin-bottom: 1.5rem;
+            transform: translateZ(30px);
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .card h3 {
+            font-size: 1.5rem;
+            margin: 1rem 0;
+            color: var(--primary);
+            transform: translateZ(40px);
+        }
+
+        .card p {
+            color: rgba(255, 255, 255, 0.7);
+            line-height: 1.6;
+            transform: translateZ(20px);
+        }
+
+        .transcript-section {
+            margin-top: 8rem;
+            perspective: 1500px;
+        }
+
+        .transcript-box {
+            background: rgba(0, 0, 0, 0.6);
+            border: 1px solid var(--secondary);
+            border-radius: 32px;
+            padding: 3rem;
+            transform: rotateX(15deg);
+            max-height: 500px;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: var(--secondary) transparent;
+        }
+
+        .transcript-line {
+            padding: 0.8rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            font-family: 'JetBrains Mono', 'Courier New', monospace;
+            opacity: 0.8;
+            transition: opacity 0.3s ease;
+        }
+
+        .transcript-line:hover {
+            opacity: 1;
+            background: rgba(112, 0, 255, 0.1);
+        }
+
+        .tag {
+            display: inline-block;
+            padding: 0.4rem 1rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: bold;
+            margin-right: 0.5rem;
+            text-transform: uppercase;
+        }
+
+        .tag.buyer { background: rgba(0, 242, 255, 0.2); color: var(--primary); }
+        .tag.seller { background: rgba(112, 0, 255, 0.2); color: var(--secondary); }
+
+        footer {
+            text-align: center;
+            padding: 4rem;
+            opacity: 0.5;
+            font-size: 0.9rem;
+        }
+
+        /* 3D Depth Layer */
+        .card::after {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            border-radius: 24px;
+            background: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, transparent 100%);
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="background"></div>
+    
+    <div class="container">
+        <header id="main-header">
+            <h1>DealForge 3D</h1>
+            <div class="subtitle">Neural Negotiation Environment Visualization</div>
+        </header>
+
+        <div class="grid">
+            <div class="card" onmousemove="handleTilt(event, this)" onmouseleave="resetTilt(this)">
+                <img src="assets/readme/reward_curve.png" alt="Reward Curve">
+                <h3>Reward Convergence</h3>
+                <p>Tracking the model's policy stability over thousands of simulated negotiation environment steps.</p>
+            </div>
+
+            <div class="card" onmousemove="handleTilt(event, this)" onmouseleave="resetTilt(this)">
+                <img src="assets/readme/success_quality_comparison.png" alt="Success Quality">
+                <h3>Agreement Quality</h3>
+                <p>Multi-parameter analysis comparing raw success rate with the objective quality of the negotiated deals.</p>
+            </div>
+
+            <div class="card" onmousemove="handleTilt(event, this)" onmouseleave="resetTilt(this)">
+                <img src="assets/readme/reward_components.png" alt="Reward Components">
+                <h3>Reward Decomposition</h3>
+                <p>Visualization of individual reward signals including Progress, Fairness, and Risk mitigation factors.</p>
+            </div>
+
+            <div class="card" onmousemove="handleTilt(event, this)" onmouseleave="resetTilt(this)">
+                <img src="assets/readme/learning_efficiency.png" alt="Learning Efficiency">
+                <h3>Learning Efficiency</h3>
+                <p>A 3D perspective on resource utilization and step-wise sample efficiency during the GRPO training phase.</p>
+            </div>
+        </div>
+
+        <div class="transcript-section">
+            <h2 align="center" style="margin-bottom: 3rem; color: var(--secondary);">Live Negotiation Feed</h2>
+            <div class="transcript-box">
+                <div class="transcript-line"><span class="tag buyer">Buyer</span> Connected to DealForge Environment...</div>
+                <div class="transcript-line"><span class="tag seller">Seller</span> Initializing negotiation parameters...</div>
+                <div class="transcript-line"><span class="tag buyer">Buyer</span> offer = 0.16</div>
+                <div class="transcript-line"><span class="tag seller">Seller</span> counter = 0.33</div>
+                <div class="transcript-line"><span class="tag buyer">Buyer</span> action = modify_clause [High Risk]</div>
+                <div class="transcript-line"><span class="tag seller">Seller</span> counter = 0.38</div>
+                <div class="transcript-line"><span class="tag buyer">Buyer</span> action = ask_question [Information Gain +0.12]</div>
+                <div class="transcript-line"><span class="tag seller">Seller</span> counter = 0.59</div>
+                <div class="transcript-line"><span class="tag buyer">Buyer</span> offer = 0.74</div>
+                <div class="transcript-line"><span class="tag seller">Seller</span> counter = 0.61</div>
+                <div class="transcript-line"><span class="tag buyer">Buyer</span> action = accept_deal</div>
+                <div class="transcript-line"><span class="tag seller">Seller</span> accept [Deal Reach Agreement]</div>
+                <div class="transcript-line" style="color: var(--primary); font-weight: bold;">>>> EPISODE SUCCESS: QUALITY 0.82</div>
+            </div>
+        </div>
+
+        <footer>
+            Built with DealForge Engine &copy; 2026 | Multi-Agent Orchestration
+        </footer>
+    </div>
+
+    <script>
+        function handleTilt(e, card) {
+            const rect = card.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            
+            const centerX = rect.width / 2;
+            const centerY = rect.height / 2;
+            
+            const rotateX = (y - centerY) / 10;
+            const rotateY = (centerX - x) / 10;
+            
+            card.style.transform = `perspective(1000px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) scale3d(1.02, 1.02, 1.02)`;
+        }
+
+        function resetTilt(card) {
+            card.style.transform = `perspective(1000px) rotateX(0deg) rotateY(0deg) scale3d(1, 1, 1)`;
+        }
+
+        // Animation for the header
+        document.addEventListener('mousemove', (e) => {
+            const header = document.getElementById('main-header');
+            const x = (window.innerWidth / 2 - e.pageX) / 25;
+            const y = (window.innerHeight / 2 - e.pageY) / 25;
+            header.style.transform = `rotateY(${x}deg) rotateX(${y}deg)`;
+        });
+    </script>
+</body>
+</html>
