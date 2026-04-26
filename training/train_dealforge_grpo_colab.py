@@ -168,12 +168,13 @@ def rollout_episode_from_actions(
         transcript.append(step_event)
         reward_components = info.get("reward_components", {}) if isinstance(info, dict) else {}
         reward_meta = info.get("reward_metadata", {}) if isinstance(info, dict) else {}
+        risk_obs = float(reward_meta.get("risk_score", 0.0))
         step_logs.append(
             {
                 "step": i + 1,
                 "action": a.get("action_name"),
                 "total_reward": float(reward or 0.0),
-                "risk_score": float(reward_components.get("risk_penalty", 0.0)),
+                "risk_score": risk_obs,
                 "trust_score": float(reward_meta.get("trust_score", 0.0)),
                 **{k: float(v) for k, v in reward_components.items() if isinstance(v, (int, float))},
             }
@@ -191,12 +192,13 @@ def rollout_episode_from_actions(
         transcript.append(step_event)
         reward_components = info.get("reward_components", {}) if isinstance(info, dict) else {}
         reward_meta = info.get("reward_metadata", {}) if isinstance(info, dict) else {}
+        risk_obs = float(reward_meta.get("risk_score", 0.0))
         step_logs.append(
             {
                 "step": len(transcript),
                 "action": a.get("action_name"),
                 "total_reward": float(reward or 0.0),
-                "risk_score": float(reward_components.get("risk_penalty", 0.0)),
+                "risk_score": risk_obs,
                 "trust_score": float(reward_meta.get("trust_score", 0.0)),
                 **{k: float(v) for k, v in reward_components.items() if isinstance(v, (int, float))},
             }
@@ -234,7 +236,8 @@ def generate_plan_with_model(
         **inputs,
         do_sample=True,
         temperature=temperature,
-        top_p=0.95,
+        top_p=0.9,
+        top_k=50,
         max_new_tokens=max_new_tokens,
         pad_token_id=tokenizer.eos_token_id,
     )
@@ -269,7 +272,7 @@ def evaluate_policy(
 
         result = rollout_episode_from_actions(env_config_path, actions, seed=s)
         rewards.append(result.total_reward)
-        successes.append(1 if result.success else 0)
+        successes.append(1 if (result.success or (result.success and result.avg_risk < 0.6)) else 0)
         qualities.append(result.quality)
         steps.append(result.steps)
         risks.append(result.avg_risk)
@@ -325,8 +328,8 @@ def save_pretty_step_logs(path: Path, rows: List[Dict[str, Any]]) -> None:
             f.write(
                 "Step {step} | reward={reward:.2f} | risk={risk:.2f} | success={success}\n".format(
                     step=int(r.get("step", 0)),
-                    reward=float(r.get("total_reward", 0.0)),
-                    risk=float(r.get("risk_score", 0.0)),
+                    reward=float(r.get("reward", 0.0)),
+                    risk=float(r.get("risk", 0.0)),
                     success=int(bool(r.get("success", False))),
                 )
             )
@@ -361,9 +364,13 @@ def plot_judge_ready_curves(out_dir: Path, step_rows: List[Dict[str, Any]], base
     trust = [float(r.get("trust_score", 0.0)) for r in step_rows]
     success = [1 if bool(r.get("success", False)) else 0 for r in step_rows]
 
-    reward_ma = moving_average(rewards, max(2, len(rewards) // 10))
-    risk_ma = moving_average(risk, max(2, len(risk) // 10))
-    success_ma = rolling_success(success, max(2, len(success) // 10))
+    reward_ma = moving_average(rewards, 5)
+    risk_ma = moving_average(risk, 5)
+    success_cumulative: List[float] = []
+    running_success = 0.0
+    for i, s in enumerate(success):
+        running_success += float(s)
+        success_cumulative.append(running_success / float(i + 1))
     efficiency = [rw / max(1e-6, rk) for rw, rk in zip(rewards, risk)]
 
     fig = plt.figure(figsize=(10, 4))
@@ -392,7 +399,8 @@ def plot_judge_ready_curves(out_dir: Path, step_rows: List[Dict[str, Any]], base
     plt.close(fig)
 
     fig = plt.figure(figsize=(10, 4))
-    plt.plot(x, success_ma, label="rolling_success")
+    if len(success) > 0:
+        plt.plot(success_cumulative, label="Success Rate")
     plt.xlabel("Step")
     plt.ylabel("Success Rate")
     plt.title("Success Curve")
@@ -467,14 +475,17 @@ def save_conversations(out_dir: Path, transcripts: List[Dict[str, Any]]) -> None
     save_jsonl(jsonl_path, transcripts)
     lines: List[str] = []
     for idx, tr in enumerate(transcripts):
-        lines.append(f"Episode {idx + 1}:")
-        lines.append("-" * 26)
+        lines.append(f"=== EPISODE {idx + 1} ===")
+        turns = 0
+        final_offer = None
         for ev in tr.get("transcript", []):
             action = ev.get("action")
             seller = ev.get("seller", {})
             offer = ev.get("action_payload", {}).get("price_signal")
+            turns += 1
             if offer is not None:
                 lines.append(f"Buyer: offer = {offer:.2f}" if isinstance(offer, (int, float)) else f"Buyer: offer = {offer}")
+                final_offer = offer
             elif action:
                 lines.append(f"Buyer: action = {action}")
             if isinstance(seller, dict):
@@ -482,6 +493,7 @@ def save_conversations(out_dir: Path, transcripts: List[Dict[str, Any]]) -> None
                     counter = seller.get("counter_offer", {}).get("price_signal")
                     if counter is not None:
                         lines.append(f"Seller: counter = {counter:.2f}" if isinstance(counter, (int, float)) else f"Seller: counter = {counter}")
+                        final_offer = counter
                 elif seller.get("decision") is not None:
                     lines.append(f"Seller: {seller.get('decision')}")
         ep = tr.get("episode", {})
@@ -490,11 +502,11 @@ def save_conversations(out_dir: Path, transcripts: List[Dict[str, Any]]) -> None
             risk = ev.get("risk", {})
             if isinstance(risk, dict) and isinstance(risk.get("risk_score"), (int, float)):
                 risk_vals.append(float(risk["risk_score"]))
-        lines.append("-" * 26)
-        lines.append("Final:")
-        lines.append(f"Reward: {float(ep.get('total_reward', 0.0)):.2f}")
-        lines.append(f"Risk: {float(np.mean(risk_vals)) if risk_vals else 0.0:.2f}")
-        lines.append("-" * 26)
+        lines.append("--- SUMMARY ---")
+        lines.append(f"Turns: {turns}")
+        lines.append(f"Final Offer: {final_offer if final_offer is not None else 'n/a'}")
+        lines.append(f"Avg Risk: {float(np.mean(risk_vals)) if risk_vals else 0.0:.2f}")
+        lines.append(f"Outcome: {'SUCCESS' if bool(ep.get('success', False)) else 'FAIL'}")
         lines.append("")
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
@@ -560,6 +572,9 @@ def ppo_train_with_environment(
     rng = random.Random(12345)
     logs: List[Dict[str, Any]] = []
     step_rows: List[Dict[str, Any]] = []
+    rewards: List[float] = []
+    risks: List[float] = []
+    success_list: List[int] = []
 
     device = torch.device("cpu")
 
@@ -582,7 +597,8 @@ def ppo_train_with_environment(
                     input_ids=query_ids.unsqueeze(0),
                     do_sample=True,
                     temperature=temperature,
-                    top_p=0.95,
+                    top_p=0.9,
+                    top_k=50,
                     max_new_tokens=max_new_tokens,
                     pad_token_id=tokenizer.eos_token_id,
                 )[0]
@@ -600,14 +616,21 @@ def ppo_train_with_environment(
 
             rollout_seed = rng.randint(1, 10**9)
             ep = rollout_episode_from_actions(env_config_path, actions, rollout_seed)
+            episode_reward = float(ep.total_reward)
+            episode_reward = max(min(episode_reward, 2.0), -2.0)
+            risk_score = float(ep.avg_risk)
+            success = 1 if (bool(ep.success) or (bool(ep.success) and risk_score < 0.6)) else 0
 
             query_tensors.append(query_ids)
             response_tensors.append(response_ids)
-            rewards_list.append(float(ep.total_reward))
+            rewards_list.append(float(episode_reward))
+            rewards.append(float(episode_reward))
+            risks.append(risk_score)
+            success_list.append(success)
             for row in ep.step_logs:
                 row_copy = dict(row)
                 row_copy["global_step"] = len(step_rows)
-                row_copy["success"] = bool(ep.success)
+                row_copy["success"] = bool(success)
                 step_rows.append(row_copy)
 
         reward_tensors = [
@@ -622,16 +645,22 @@ def ppo_train_with_environment(
 
         step_log = {
             "step": step,
-            "reward_mean": float(np.mean(rewards_list)),
-            "reward_std": float(np.std(rewards_list)),
-            "stats": {k: float(v) if isinstance(v, (int, float, np.number)) else str(v) for k, v in stats.items()},
+            "reward": float(np.mean(rewards_list)),
+            "risk": float(np.mean(risks[-max(1, batch_size):])) if risks else 0.0,
+            "success": int(np.mean(success_list[-max(1, batch_size):]) >= 0.5) if success_list else 0,
         }
         logs.append(step_log)
         avg_risk = float(np.mean([float(x.get("risk_score", 0.0)) for x in step_rows[-max(1, batch_size):]]))
         success_int = int(np.mean([1 if bool(x.get("success", False)) else 0 for x in step_rows[-max(1, batch_size):]]) >= 0.5)
-        print(f"Step {step} | reward={np.mean(rewards_list):.2f} | risk={avg_risk:.2f} | success={success_int}")
+        print(f"Step {step} | reward={np.mean(rewards_list):.3f} | risk={avg_risk:.2f} | success={success_int}")
 
-    return {"logs": logs, "step_logs": step_rows}
+    return {
+        "logs": logs,
+        "step_logs": step_rows,
+        "rewards": rewards,
+        "risks": risks,
+        "success": success_list,
+    }
 
 
 def main() -> None:
@@ -644,10 +673,10 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max_steps", type=int, default=20)
     parser.add_argument("--max_new_tokens", type=int, default=64)
-    parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--learning_rate", type=float, default=1e-5)
-    parser.add_argument("--batch_size", type=int, default=2)
-    parser.add_argument("--mini_batch_size", type=int, default=1)
+    parser.add_argument("--temperature", type=float, default=0.85)
+    parser.add_argument("--learning_rate", type=float, default=2e-6)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--mini_batch_size", type=int, default=4)
     parser.add_argument("--ppo_epochs", type=int, default=4)
     args = parser.parse_args()
 
@@ -655,8 +684,8 @@ def main() -> None:
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = f"{args.output_dir}_{run_name}"
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = f"{args.output_dir}_{run_id}"
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -690,6 +719,9 @@ def main() -> None:
         batch_size=args.batch_size,
         mini_batch_size=args.mini_batch_size,
         ppo_epochs=args.ppo_epochs,
+        init_kl_coef=0.2,
+        target_kl=3.0,
+        cliprange=0.15,
         log_with=None,
         seed=args.seed,
     )
@@ -725,8 +757,9 @@ def main() -> None:
     tokenizer.save_pretrained(trained_model_dir)
 
     save_json(out_dir / "train_output.json", train_output)
-    save_jsonl(out_dir / "logs.jsonl", train_output.get("step_logs", []))
-    save_pretty_step_logs(out_dir / "logs_pretty.txt", train_output.get("step_logs", []))
+    save_jsonl(out_dir / "logs.jsonl", train_output.get("logs", []))
+    save_jsonl(out_dir / "step_logs.jsonl", train_output.get("step_logs", []))
+    save_pretty_step_logs(out_dir / "logs_pretty.txt", train_output.get("logs", []))
     plot_judge_ready_curves(out_dir, train_output.get("step_logs", []), baseline_metrics["reward_mean"])
 
     trained_model = AutoModelForCausalLMWithValueHead.from_pretrained(str(trained_model_dir))
@@ -745,27 +778,19 @@ def main() -> None:
     save_jsonl(out_dir / "transcripts_trained.jsonl", trained_metrics["transcripts"][:k])
     save_conversations(out_dir, trained_metrics["transcripts"][:k])
 
+    baseline_reward = float(baseline_metrics["reward_mean"])
+    trained_reward = float(trained_metrics["reward_mean"])
+    reward_improvement_pct = (
+        ((trained_reward - baseline_reward) / abs(baseline_reward) * 100.0)
+        if abs(baseline_reward) > 1e-12
+        else 0.0
+    )
     comparison_log = {
-        "baseline": {
-            "reward_mean": baseline_metrics["reward_mean"],
-            "success_rate": baseline_metrics["success_rate"],
-            "quality_mean": baseline_metrics["quality_mean"],
-            "steps_mean": baseline_metrics["steps_mean"],
-            "risk_mean": baseline_metrics.get("risk_mean", 0.0),
-        },
-        "trained": {
-            "reward_mean": trained_metrics["reward_mean"],
-            "success_rate": trained_metrics["success_rate"],
-            "quality_mean": trained_metrics["quality_mean"],
-            "steps_mean": trained_metrics["steps_mean"],
-            "risk_mean": trained_metrics.get("risk_mean", 0.0),
-        },
-        "delta": {
-            "reward_mean": trained_metrics["reward_mean"] - baseline_metrics["reward_mean"],
-            "success_rate": trained_metrics["success_rate"] - baseline_metrics["success_rate"],
-            "quality_mean": trained_metrics["quality_mean"] - baseline_metrics["quality_mean"],
-            "risk_mean": trained_metrics.get("risk_mean", 0.0) - baseline_metrics.get("risk_mean", 0.0),
-        },
+        "baseline_reward": baseline_reward,
+        "trained_reward": trained_reward,
+        "reward_improvement_pct": reward_improvement_pct,
+        "baseline_success": float(baseline_metrics["success_rate"]),
+        "trained_success": float(trained_metrics["success_rate"]),
     }
     save_json(out_dir / "comparison.json", comparison_log)
 
