@@ -205,8 +205,7 @@ def rollout_episode_from_actions(
         )
 
     st = env.state().get("dynamic_state", {})
-    terminal = st.get("terminal", {})
-    success = bool(terminal.get("deal_success", False))
+    success = bool(info.get("success", 0)) if isinstance(info, dict) else False
     quality = compute_negotiation_quality(transcript, st)
     steps = int(st.get("time_steps", {}).get("current", len(transcript)))
 
@@ -272,7 +271,7 @@ def evaluate_policy(
 
         result = rollout_episode_from_actions(env_config_path, actions, seed=s)
         rewards.append(result.total_reward)
-        successes.append(1 if (result.success or (result.success and result.avg_risk < 0.6)) else 0)
+        successes.append(1 if result.success else 0)
         qualities.append(result.quality)
         steps.append(result.steps)
         risks.append(result.avg_risk)
@@ -411,9 +410,10 @@ def plot_judge_ready_curves(out_dir: Path, step_rows: List[Dict[str, Any]], base
     plt.close(fig)
 
     fig = plt.figure(figsize=(10, 4))
-    plt.plot(x, [float(r.get("value_reward", 0.0)) for r in step_rows], label="value")
+    plt.plot(x, [float(r.get("success", 0.0)) for r in step_rows], label="success")
     plt.plot(x, [float(r.get("risk_penalty", 0.0)) for r in step_rows], label="risk_penalty")
-    plt.plot(x, [float(r.get("trust_reward", 0.0)) for r in step_rows], label="trust_reward")
+    plt.plot(x, [float(r.get("fairness", 0.0)) for r in step_rows], label="fairness")
+    plt.plot(x, [float(r.get("progress", 0.0)) for r in step_rows], label="progress")
     plt.xlabel("Step")
     plt.ylabel("Component Value")
     plt.title("Reward Components Over Time")
@@ -496,6 +496,30 @@ def save_conversations(out_dir: Path, transcripts: List[Dict[str, Any]]) -> None
                         final_offer = counter
                 elif seller.get("decision") is not None:
                     lines.append(f"Seller: {seller.get('decision')}")
+            transition = ev.get("state_transition", {})
+            if transition:
+                lines.append(
+                    "State: {src} -> {dst} (agreement={agr}, done={done})".format(
+                        src=transition.get("from", "unknown"),
+                        dst=transition.get("to", "unknown"),
+                        agr=bool(transition.get("agreement", False)),
+                        done=bool(transition.get("done", False)),
+                    )
+                )
+            reward_breakdown = ev.get("reward_breakdown", {})
+            if reward_breakdown:
+                lines.append("Reward Breakdown:")
+                for key in (
+                    "success",
+                    "progress",
+                    "fairness",
+                    "risk_penalty",
+                    "efficiency_penalty",
+                    "invalid_behavior",
+                ):
+                    if key in reward_breakdown:
+                        val = float(reward_breakdown.get(key, 0.0))
+                        lines.append(f"  {key}: {val:+.3f}")
         ep = tr.get("episode", {})
         risk_vals = []
         for ev in tr.get("transcript", []):
@@ -532,8 +556,9 @@ def write_summary(out_dir: Path, before: Dict[str, Any], after: Dict[str, Any]) 
     lines.append("# DealForge PPO Summary")
     lines.append("")
     lines.append("## Reward Formula")
-    lines.append("- total = value + agreement + trust - risk - pressure - inefficiency - invalid - repeat - oscillation + success + deal_bonus")
-    lines.append("- total_reward is clipped to [-2, 2]")
+    lines.append("- total = success + progress + fairness + risk_penalty + efficiency_penalty + invalid_behavior")
+    lines.append("- success requires BOTH buyer accept_deal and seller accept in same turn")
+    lines.append("- total_reward is clipped to [-3, 5]")
     lines.append("")
     lines.append("## Baseline")
     lines.append(f"- reward_mean: {before['reward_mean']:.4f}")
@@ -617,9 +642,9 @@ def ppo_train_with_environment(
             rollout_seed = rng.randint(1, 10**9)
             ep = rollout_episode_from_actions(env_config_path, actions, rollout_seed)
             episode_reward = float(ep.total_reward)
-            episode_reward = max(min(episode_reward, 2.0), -2.0)
+            episode_reward = max(min(episode_reward, 5.0), -3.0)
             risk_score = float(ep.avg_risk)
-            success = 1 if (bool(ep.success) or (bool(ep.success) and risk_score < 0.6)) else 0
+            success = 1 if bool(ep.success) else 0
 
             query_tensors.append(query_ids)
             response_tensors.append(response_ids)

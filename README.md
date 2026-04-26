@@ -20,15 +20,18 @@ Production-style negotiation environment implemented with OpenEnv `MCPEnvironmen
   - `LegalAgent`
   - `RiskAgent`
   - `CompetitorAgent`
-- Config-driven stochastic dynamics (no fixed outcomes)
-- Dedicated multi-component reward engine with delayed effects
+- Explicit negotiation state machine: `negotiation -> agreement -> terminated`
+- Deal success only on bilateral acceptance (`buyer: accept_deal` + `seller: accept`)
+- Dedicated composable reward engine:
+  - `success`, `progress`, `fairness`, `risk_penalty`, `efficiency_penalty`, `invalid_behavior`
+  - clipped to `[-3, 5]`
 
 ## Files
 
 - `dealforge/openenv_environment.py` - main MCP environment
 - `dealforge/openenv_models.py` - Action/Observation/State models
 - `dealforge/internal_agents.py` - modular internal agents
-- `dealforge/reward_engine.py` - weighted reward decomposition + delayed penalties
+- `dealforge/reward_engine.py` - composable reward decomposition for stable RL learning
 - `configs/dealforge_default.yaml` - parameterized configuration
 - `examples/run_openenv_dealforge.py` - interaction flow example
 
@@ -92,4 +95,3 @@ Artifacts:
 - `transcripts_baseline.jsonl`
 - `transcripts_trained.jsonl`
 - `summary.md`
-

@@ -279,17 +279,12 @@ class Logger:
             "episode_index": int(episode_index),
             "step_index": int(step_index),
             "total_reward": float(total_reward),
-            "value_reward": _safe_float(flat_breakdown.get("reward.value_reward")),
-            "agreement_reward": _safe_float(flat_breakdown.get("reward.agreement_reward")),
-            "trust_reward": _safe_float(flat_breakdown.get("reward.trust_reward")),
+            "success_component": _safe_float(flat_breakdown.get("reward.success")),
+            "progress_component": _safe_float(flat_breakdown.get("reward.progress")),
+            "fairness_component": _safe_float(flat_breakdown.get("reward.fairness")),
             "risk_penalty": _safe_float(flat_breakdown.get("reward.risk_penalty")),
-            "inefficiency_penalty": _safe_float(flat_breakdown.get("reward.inefficiency_penalty")),
-            "invalid_action_penalty": _safe_float(flat_breakdown.get("reward.invalid_action_penalty")),
-            "invalid_penalty": _safe_float(
-                flat_breakdown.get("reward.invalid_penalty")
-                if flat_breakdown.get("reward.invalid_penalty") is not None
-                else flat_breakdown.get("reward.invalid_action_penalty")
-            ),
+            "efficiency_penalty": _safe_float(flat_breakdown.get("reward.efficiency_penalty")),
+            "invalid_behavior": _safe_float(flat_breakdown.get("reward.invalid_behavior")),
         }
         step_record.update(flat_breakdown)
         step_record.update(flat_info)

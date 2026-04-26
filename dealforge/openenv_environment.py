@@ -81,7 +81,25 @@ class DealForgeMCPEnvironment:
             "visible_state": {},
             "hidden_state": hidden_state,
             "reward_state": self.reward_engine.initialize_reward_state(),
-            "terminal": {"deal_success": False, "deadline": False, "failure": False},
+            "state": {
+                "phase": "negotiation",
+                "deal_accepted": False,
+                "buyer_accepted": False,
+                "seller_accepted": False,
+                "turn_count": 0,
+                "last_actions": [],
+            },
+            "terminal": {
+                "deal_success": False,
+                "agreement": False,
+                "deadline": False,
+                "buyer_rejected": False,
+                "failure": False,
+            },
+            "metrics": {
+                "episode_success": 0,
+                "cumulative_success_count": 0,
+            },
         }
 
         self._refresh_visible_state(last_event={"event": "reset"})
@@ -89,19 +107,45 @@ class DealForgeMCPEnvironment:
 
     def step(self, action: Dict[str, Any] | Any) -> tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
         """Execute one environment step and return (observation, reward, done, info)."""
-        if self._done:
-            info = {"error": "Episode has ended. Call reset().", "episode_id": self._episode_id}
+        if self._done or self._state_dict.get("state", {}).get("phase") == "terminated":
+            info = {
+                "error": "Episode has terminated. Call reset() before acting again.",
+                "episode_id": self._episode_id,
+                "state_transition": {"from": "terminated", "to": "terminated", "reason": "action_after_done"},
+                "reward_components": {
+                    "success": 0.0,
+                    "progress": 0.0,
+                    "fairness": 0.0,
+                    "risk_penalty": 0.0,
+                    "efficiency_penalty": 0.0,
+                    "invalid_behavior": -2.0,
+                },
+                "success": 0,
+            }
             return copy.deepcopy(self._state_dict.get("visible_state", {})), 0.0, True, info
 
         norm_action = self._normalize_action(action)
         transition_event = self._apply_agent_action(norm_action)
 
         seller_out = self.seller_agent.respond(self._state_dict)
-        legal_out = self.legal_agent.evaluate(self._state_dict)
-        risk_out = self.risk_agent.evaluate(self._state_dict)
-        competitor_out = self.competitor_agent.pressure_update(self._state_dict)
+        buyer_action = str(norm_action.get("action_name") or "")
+        seller_response = str(seller_out.get("decision") or "")
+        done = False
+        deal_accepted = False
+        if buyer_action == "accept_deal" and seller_response == "accept":
+            done = True
+            deal_accepted = True
+            self._done = True
 
-        self._merge_internal_outputs(seller_out, legal_out, risk_out, competitor_out)
+        if done:
+            legal_out = {"legal_warning": False, "severity": "none", "required_changes": [], "penalty": 0.0}
+            risk_out = {"risk_score": float(self._state_dict.get("risk_score", 0.0)), "risk_flags": []}
+            competitor_out = {"external_pressure": float(self._state_dict.get("external_pressure", 0.0))}
+        else:
+            legal_out = self.legal_agent.evaluate(self._state_dict)
+            risk_out = self.risk_agent.evaluate(self._state_dict)
+            competitor_out = self.competitor_agent.pressure_update(self._state_dict)
+            self._merge_internal_outputs(seller_out, legal_out, risk_out, competitor_out)
 
         self._step_count += 1
         self._state_dict["time_steps"] = {
@@ -110,20 +154,58 @@ class DealForgeMCPEnvironment:
             "max": self._max_steps,
         }
 
-        terminal_reasons = self._compute_termination(norm_action, seller_out, legal_out, risk_out)
-        self._done = any(terminal_reasons.values())
+        sm = self._state_dict["state"]
+        sm["turn_count"] = int(self._step_count)
+        sm["buyer_accepted"] = bool(buyer_action == "accept_deal")
+        sm["seller_accepted"] = bool(seller_response == "accept")
+        sm["deal_accepted"] = bool(sm["buyer_accepted"] and sm["seller_accepted"])
+        sm.setdefault("last_actions", []).append(str(norm_action.get("action_name") or ""))
+        if len(sm["last_actions"]) > 8:
+            del sm["last_actions"][:-8]
+
+        prev_phase = str(sm.get("phase", "negotiation"))
+        terminal_reasons = {
+            "deal_success": False,
+            "agreement": False,
+            "deadline": False,
+            "buyer_rejected": False,
+            "failure": False,
+        }
+
+        if done and deal_accepted:
+            sm["deal_accepted"] = True
+            sm["phase"] = "agreement"
+            terminal_reasons["agreement"] = True
+            terminal_reasons["deal_success"] = True
+            sm["phase"] = "terminated"
+            self._done = True
+        elif norm_action.get("action_name") == "reject_deal":
+            sm["phase"] = "terminated"
+            terminal_reasons["buyer_rejected"] = True
+            self._done = True
+        elif self._step_count >= self._max_steps:
+            sm["phase"] = "terminated"
+            terminal_reasons["deadline"] = True
+            self._done = True
+        else:
+            sm["phase"] = "negotiation"
+            self._done = False
+
+        done = bool(self._done)
+        deal_accepted = bool(sm.get("deal_accepted", False))
         self._state_dict["terminal"] = terminal_reasons
+        success = 1 if (done and deal_accepted) else 0
+        self._state_dict["metrics"]["episode_success"] = int(success)
 
         reward, reward_components, reward_meta = self.reward_engine.compute_step_reward(
             action=norm_action,
             state=self._state_dict,
             seller_out=seller_out,
-            legal_out=legal_out,
             risk_out=risk_out,
-            competitor_out=competitor_out,
-            terminal_flags=terminal_reasons,
+            agreement_reached=bool(terminal_reasons["deal_success"]),
+            acted_after_agreement=False,
             step_index=self._step_count,
-            max_steps=self._max_steps,
+            done=done,
         )
 
         step_event = {
@@ -134,7 +216,13 @@ class DealForgeMCPEnvironment:
             "legal": legal_out,
             "risk": risk_out,
             "competitor": competitor_out,
-            "volatility_signal": self.rng.uniform(-1.0, 1.0),
+            "state_transition": {
+                "from": prev_phase,
+                "to": sm["phase"],
+                "agreement": bool(terminal_reasons["agreement"]),
+                "done": bool(self._done),
+            },
+            "reward_breakdown": copy.deepcopy(reward_components),
         }
         self._state_dict["negotiation_history"].append(step_event)
 
@@ -143,9 +231,16 @@ class DealForgeMCPEnvironment:
         info = {
             "episode_id": self._episode_id,
             "termination": terminal_reasons,
+            "state_transition": {
+                "from": prev_phase,
+                "to": sm["phase"],
+                "reason": self._termination_reason_from_flags(terminal_reasons),
+            },
+            "state": copy.deepcopy(sm),
             "reward_components": reward_components,
             "reward_metadata": reward_meta,
             "event_log": [transition_event, step_event],
+            "success": int(success),
         }
         return copy.deepcopy(self._state_dict["visible_state"]), float(reward), self._done, info
 
@@ -227,42 +322,15 @@ class DealForgeMCPEnvironment:
         self._state_dict["risk_score"] = float(risk_out.get("risk_score", self._state_dict["risk_score"]))
         self._state_dict["external_pressure"] = float(competitor_out.get("external_pressure", self._state_dict["external_pressure"]))
 
-    def _compute_termination(
-        self,
-        action: Dict[str, Any],
-        seller_out: Dict[str, Any],
-        legal_out: Dict[str, Any],
-        risk_out: Dict[str, Any],
-    ) -> Dict[str, bool]:
-        term_cfg = self.config.get("termination", {})
-
-        deal_success = False
-        if action.get("action_name") == "accept_deal":
-            accept_prob = float(seller_out.get("accept_probability", 0.0))
-            accept_sensitivity = float(term_cfg.get("accept_sensitivity", 1.0))
-            legal_risk = float(legal_out.get("legal_risk", 1.0))
-            total_risk = float(risk_out.get("risk_score", 1.0))
-
-            success_likelihood = max(0.0, min(1.0, accept_prob * accept_sensitivity * (1.0 - 0.5 * (legal_risk + total_risk))))
-            deal_success = self.rng.random() < success_likelihood
-
-        deadline = self._step_count >= self._max_steps
-
-        failure_risk = (
-            float(term_cfg.get("risk_weight", 0.5)) * float(risk_out.get("risk_score", 0.0))
-            + float(term_cfg.get("pressure_weight", 0.3)) * float(self._state_dict.get("external_pressure", 0.0))
-            + float(term_cfg.get("trust_weight", 0.2)) * (1.0 - float(self._state_dict.get("trust_score", 0.0)))
-        )
-        failure = self.rng.random() < max(0.0, min(1.0, failure_risk))
-
-        if action.get("action_name") == "reject_deal":
-            failure = self.rng.random() < float(term_cfg.get("reject_failure_probability", 0.7))
-
-        return {
-            "deal_success": bool(deal_success),
-            "deadline": bool(deadline and not deal_success),
-            "failure": bool(failure and not deal_success),
-        }
+    @staticmethod
+    def _termination_reason_from_flags(flags: Dict[str, bool]) -> str:
+        if flags.get("deal_success"):
+            return "agreement"
+        if flags.get("buyer_rejected"):
+            return "buyer_rejected"
+        if flags.get("deadline"):
+            return "deadline"
+        return "none"
 
     def _refresh_visible_state(self, last_event: Dict[str, Any]) -> None:
         history = self._state_dict.get("negotiation_history", [])
@@ -273,6 +341,7 @@ class DealForgeMCPEnvironment:
             "risk_score": float(self._state_dict.get("risk_score", 0.0)),
             "trust_score": float(self._state_dict.get("trust_score", 0.0)),
             "external_pressure": float(self._state_dict.get("external_pressure", 0.0)),
+            "state": copy.deepcopy(self._state_dict.get("state", {})),
             "last_event": copy.deepcopy(last_event),
             "available_actions": [
                 "propose_contract",
